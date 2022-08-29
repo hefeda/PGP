@@ -1,0 +1,49 @@
+<html>
+
+<head>
+    <title>Sequence Analysis</title>
+    <meta charset="utf-8">
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0">
+
+    <link rel="stylesheet" type="text/css" href="libs/semantic.min.css">
+    <link rel="stylesheet" type="text/css" href="style.css">
+    <script
+            src="https://code.jquery.com/jquery-3.1.1.min.js"
+            integrity="sha256-hVVnYaiADRTO2PzUGmuLJr8BLUSjGIZsDYGmIJLv2b8="
+            crossorigin="anonymous"></script>
+    <script src="libs/semantic.min.js"></script>
+    <script src="libs/zip.min.js"></script>
+    <script src="libs/gauge.min.js"></script>
+    <script src="libs/isotope.pkgd.min.js"></script>
+</head>
+
+<body>
+<div class="ui grid">
+    <div class="sixteen wide column">
+        <h1 class="ui centered header">Sequence Analysis</h1>
+    </div>
+    <div class="sixteen wide column">
+        <div class="fileinputs" id="input-dropper">
+            <input type="file" class="file" id="file" />
+            <span class="fakefile">
+                    Drop your zip file here 📄
+                </span>
+        </div>
+    </div>
+    <div class="sixteen wide column">
+        <div id="load-example">
+            Load Example ⚡
+        </div>
+    </div>
+    <div class="sixteen wide column" id="isotope-container">
+    </div>
+</div>
+
+
+
+<script src="data_handling.js"></script>
+<script src="render_isotope.js"></script>
+</body>
+
+</html>
