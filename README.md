@@ -66,6 +66,7 @@ This allows, for example, to (de-)activate 3D structure prediction. See --help f
 ## Reproducibility
 The datasets used for the analysis in the manuscript are available at: http://data.bioembeddings.com/public/design/.
 Place them into a folder called `private` inside this repo to run the Jupyter Notebooks.
+Predictions were generated on a server with an Intel Xeon Gold 6248 CPU, a Quadro RTX 8000 (48GB vRAM) GPU and 400GB RAM DDR4 ECC (OS=Ubuntu).   
 
 # Outputs
 The current scripts generates a wealth of information for each input protein sequences.
