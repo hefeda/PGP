@@ -6,6 +6,7 @@ For an overview of currently supported predictors, check the [Output](https://gi
 
 Additionally, this script allows to generate completely novel protein sequences using [ProtGPT2](https://huggingface.co/nferruz/ProtGPT2) which can be further filtered using the aforementioned predictions.
 
+This tool which ties together many existing predictors was first introduced in [From sequence to function through structure: Deep learning for protein design](https://www.sciencedirect.com/science/article/pii/S2001037022005086).
 
 ## Installation
 
