@@ -1,5 +1,5 @@
 numpy==1.19.5
-torch==1.11
+torch==2.0.0
 transformers==4.17.0
 tqdm==4.64.0
 sentencepiece==0.1.97
