@@ -2,7 +2,7 @@
 Protein Prediction for Interpretation of Hallucinated Proteins
 
 This script allows ultra-fast (around 30 minutes per proteome) prediction of various protein properties using the protein language model [ProtT5](https://github.com/agemagician/ProtTrans).
-For an overview of currently supported predictors, check the [Output](https://github.com/mheinzinger/PPIHP/edit/main/README.md#outputs) section.
+For an overview of currently supported predictors, check the [Outputs](https://github.com/mheinzinger/PPIHP/main/README.md#outputs) section.
 
 Additionally, this script allows to generate completely novel protein sequences using [ProtGPT2](https://huggingface.co/nferruz/ProtGPT2) which can be further filtered using the aforementioned predictions.
 
