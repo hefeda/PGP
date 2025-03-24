@@ -358,12 +358,25 @@ class SETH():
 # https://github.com/Rostlab/bindPredict
 class BindPredict():
     
-    def __init__(self,model_dir):
-        model_dir = model_dir / "bindpredict"
-        if  not model_dir.is_dir():
-            model_dir.mkdir()
-        self.model = self.load_model(model_dir)
-        
+    def __init__(self,model_dir, use_onnx_model=False):
+        if use_onnx_model:
+            model_dir = model_dir / "bindpredict_onnx"
+            if  not Path(model_dir).is_dir():
+                print(f'BindPredict onnx model does not exist or is not at the correct location ({model_dir}.')
+            self.model = self.load_models_onnx(model_dir=model_dir)
+        else:
+            model_dir = model_dir / "bindpredict"
+            if  not model_dir.is_dir():
+                model_dir.mkdir()
+            self.model = self.load_model(model_dir)
+
+    def load_models_onnx(self, model_dir):
+        models = []
+        for onnx_file in Path(model_dir).iterdir():
+            onnx_model = ort.InferenceSession(onnx_file)
+            models.append(onnx_model)
+        return models
+
     def load_model(self,model_dir):
         model_names = ["checkpoint1.pt","checkpoint2.pt","checkpoint3.pt","checkpoint4.pt","checkpoint5.pt"]
         models = []
@@ -905,7 +918,7 @@ class ProtT5Microscope():
                 
             elif f=="bind":
                 print("Loading bindinx predictor")
-                p["BindEmbed21DL"] = BindPredict(model_dir)
+                p["BindEmbed21DL"] = BindPredict(model_dir, use_onnx_model=use_onnx_model)
                 r["Binding"] = list()
                 
             elif f=="go":
@@ -1017,6 +1030,8 @@ class ProtT5Microscope():
                     protein_embeddings.append(residue_embedding[idx,:s_len].mean(dim=0) )
                 # stack them again in one tensor for batch-processing
                 #protein_embeddings=torch.vstack(protein_embeddings)
+                residue_embedding_transpose = torch.permute(residue_embedding, (0,2,1))
+
                 with torch.no_grad():
                     for predictor_name, predictor in self.predictors.items():
 
@@ -1060,6 +1075,25 @@ class ProtT5Microscope():
                                 d3_Yhat, d8_Yhat = predictor.model(residue_embedding)
                             d3_Yhat = toCPU(torch.max( d3_Yhat, dim=-1, keepdim=True )[1] ).astype(np.byte)
                             d8_Yhat = toCPU(torch.max( d8_Yhat, dim=-1, keepdim=True )[1] ).astype(np.byte)
+                        elif predictor_name=="BindEmbed21DL":
+                            B, L, _ = residue_embedding.shape
+                            # container for adding predictions of individual models in the ensemble
+                            ensemble_container = torch.zeros( (B, 3, L), device=device,dtype=torch.float16)
+                            for model in predictor.model: # for each model in the ensemble
+                                if use_onnx_model:
+                                    ort_inputs = {model.get_inputs()[0].name: residue_embedding_transpose.numpy()}
+                                    model_output_numpy = model.run(None, ort_inputs)
+                                    model_output_torch = torch.from_numpy(np.float32(np.stack(model_output_numpy[0])))
+                                    pred = self.sigm(model_output_torch)
+                                    pred = torch.from_numpy(np.float32(np.stack(pred)))
+                                else:
+                                    pred = self.sigm( model(residue_embedding_transpose) )
+                                ensemble_container = ensemble_container + pred
+                            # normalize
+                            bind_Yhat = ensemble_container / len(predictor.model)
+                            # B x 3 x L --> B x L x 3
+                            bind_Yhat = torch.permute(bind_Yhat,(0,2,1))
+                            bind_Yhat = toCPU(bind_Yhat>0.5).astype(np.byte)
 
                 for batch_idx, identifier in enumerate(seq_descriptions):
                     s_len = seq_lens[batch_idx] # get sequence length of query
@@ -1073,6 +1107,8 @@ class ProtT5Microscope():
                         elif predictor_name=="ProtT5_SecStruct":
                             self.results["SecStruct3"].append(d3_Yhat[batch_idx,:s_len])
                             self.results["SecStruct8"].append(d8_Yhat[batch_idx,:s_len])
+                        elif predictor_name=="BindEmbed21DL":
+                            self.results["Binding"].append(bind_Yhat[batch_idx,:s_len,:])
         exe_time = time.time()-start
         print('Total time for generating embeddings and gathering predictions: ' +
               '{:.2f} [s] ### Avg. time per protein: {:.3f} [s]'.format(
@@ -1316,7 +1352,6 @@ def eat(lookup_embs, lookup_ids, lookup_labels, queries,threshold, norm=2):
 def download_file(url,local_path):
     if not local_path.parent.is_dir():
         local_path.parent.mkdir()
-        
     print("Downloading: {}".format(url))
     req = request.Request(url, headers={
           'User-Agent' : 'Mozilla/5.0 (Windows NT 6.1; Win64; x64)'
@@ -1337,7 +1372,6 @@ def load_model(model, weights_link, checkpoint_p,state_dict="state_dict"):
       global device
       if not device:
           device = get_device()
-      print(device)
       state = torch.load(checkpoint_p, map_location=device)
 
       model.load_state_dict(state[state_dict])
