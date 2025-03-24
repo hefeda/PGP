@@ -33,6 +33,7 @@ import h5py
 
 import onnx
 import onnxruntime as ort
+#from onnx2pytorch import ConvertModel
 
 
 
@@ -250,14 +251,19 @@ class DisorderCNN( nn.Module ):
 #### Residue-level Predictors
 # https://github.com/Rostlab/VESPA
 class ConservationPredictor():
-    def __init__(self, model_dir):
-        self.model = self.load_model(model_dir)
+    def __init__(self, model_dir, use_onnx=False):
+        if use_onnx:
+            model_path = f'{model_dir}/conservation_onnx/conservation.onnx'
+            self.model = ort.InferenceSession(model_path)
+        else:
+            self.model = self.load_model(model_dir)
 
     def load_model(self, model_dir):
       checkpoint_p = model_dir / "conservation_checkpoint.pt"
       weights_link = "http://data.bioembeddings.com/public/embeddings/feature_models/prott5cons/checkpoint.pt"
       model = ConservationCNN()
       return load_model(model, weights_link, checkpoint_p)
+
 
     def write_predictions(self, predictions, out_dir):
         out_p = out_dir / "conservation_pred.txt"
@@ -882,7 +888,7 @@ class ProtT5Microscope():
                 
             elif f=="cons":
                 print("Loading conservation predictor")
-                p["VESPA_Conservation"] = ConservationPredictor(model_dir)
+                p["VESPA_Conservation"] = ConservationPredictor(model_dir=model_dir, use_onnx=use_onnx_model)
                 r["Conservation"] = list()
                 
             elif f=="dis":
@@ -1031,6 +1037,15 @@ class ProtT5Microscope():
 
                             probabilities = (pred / len(predictor.model))
                             mem_Yhat = toCPU( predictor.decoder(probabilities, attention_mask) ).astype(np.byte)
+                        elif predictor_name=="VESPA_Conservation":
+                            if use_onnx_model:
+                                ort_inputs = {predictor.model.get_inputs()[0].name: residue_embedding.numpy()}
+                                cons_Yhat = predictor.model.run(None, ort_inputs)
+                                cons_Yhat = torch.from_numpy(np.float32(np.stack(cons_Yhat[0])))
+                                cons_Yhat = toCPU(torch.max( cons_Yhat, dim=-1, keepdim=True )[1]).astype(np.byte)
+                            else:
+                                cons_Yhat = predictor.model(residue_embedding)
+                                cons_Yhat = toCPU(torch.max( cons_Yhat, dim=-1, keepdim=True )[1]).astype(np.byte)
                 for batch_idx, identifier in enumerate(seq_descriptions):
                     s_len = seq_lens[batch_idx] # get sequence length of query
                     self.ids.append(identifier ) # store IDs
@@ -1038,6 +1053,8 @@ class ProtT5Microscope():
                     for predictor_name, predictor in self.predictors.items():
                         if predictor_name=="TMbed":
                             self.results["Membrane"].append(mem_Yhat[batch_idx,:s_len])
+                        elif predictor_name=="VESPA_Conservation":
+                            self.results["Conservation"].append(cons_Yhat[batch_idx,:s_len])
         exe_time = time.time()-start
         print('Total time for generating embeddings and gathering predictions: ' +
               '{:.2f} [s] ### Avg. time per protein: {:.3f} [s]'.format(
@@ -1307,7 +1324,7 @@ def load_model(model, weights_link, checkpoint_p,state_dict="state_dict"):
       model.load_state_dict(state[state_dict])
 
       model = model.eval()
-      model = model.half()
+      #model = model.half()
       model = model.to(device)
 
       return model
@@ -1471,7 +1488,12 @@ def main():
     id_out_p = out_dir / "ids.txt"
     microscope.write_list(microscope.ids,id_out_p)
     
-    
+    # write sequences
+    if not args.embeddings_from_file:
+        seq_out_p = out_dir / "seqs.txt"
+        microscope.write_list(microscope.seqs, seq_out_p)
+
+
     for f in fmt:
         if f=="ss":
             # write 3-state DSSP
