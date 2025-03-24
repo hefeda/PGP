@@ -1042,16 +1042,11 @@ class ProtT5Microscope():
                         elif predictor_name=="VESPA_Conservation":
                             if use_onnx_model:
                                 ort_inputs = {predictor.model.get_inputs()[0].name: residue_embedding.numpy()}
-                                # cons_Yhat = predictor.model.run(None, ort_inputs)
-                                cons_Yhat = predictor.model.run(None, {'input': residue_embedding.numpy()})
-                                with open("onnx_test.txt", "w") as f:
-                                    f.write(str(cons_Yhat))
+                                cons_Yhat = predictor.model.run(None, ort_inputs)
                                 cons_Yhat = torch.from_numpy(np.float32(np.stack(cons_Yhat[0])))
                                 cons_Yhat = toCPU(torch.max( cons_Yhat, dim=-1, keepdim=True )[1]).astype(np.byte)
                             else:
                                 cons_Yhat = predictor.model(residue_embedding)
-                                with open("org_test.txt", "w") as f:
-                                    f.write(str(cons_Yhat))
                                 cons_Yhat = toCPU(torch.max( cons_Yhat, dim=-1, keepdim=True )[1]).astype(np.byte)
                         # predict 3- and 8-state sec. struct
                         elif predictor_name=="ProtT5_SecStruct":
