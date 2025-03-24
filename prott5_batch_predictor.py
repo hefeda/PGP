@@ -33,7 +33,6 @@ import h5py
 
 import onnx
 import onnxruntime as ort
-#from onnx2pytorch import ConvertModel
 
 
 
@@ -264,7 +263,6 @@ class ConservationPredictor():
       model = ConservationCNN()
       return load_model(model, weights_link, checkpoint_p)
 
-
     def write_predictions(self, predictions, out_dir):
         out_p = out_dir / "conservation_pred.txt"
         with open(out_p, 'w+') as out_f:
@@ -395,18 +393,22 @@ class BindPredict():
         return None
     
 class SecStructPredictor():
-    def __init__(self, model_dir):
-        model_dir = model_dir / "prott5_sec_struct"
-        if  not model_dir.is_dir():
-            model_dir.mkdir()
-        self.model = self.load_model(model_dir)
+    def __init__(self, model_dir, use_onnx=False):
+        if use_onnx:
+            model_path = f'{model_dir}/sec_struct_onnx/secstruct.onnx'
+            self.model = ort.InferenceSession(model_path)
+        else:
+            model_dir = model_dir / "prott5_sec_struct"
+            if  not model_dir.is_dir():
+                model_dir.mkdir()
+            self.model = self.load_model(model_dir)
         
     def load_model(self, model_dir):
       checkpoint_p = model_dir / "secstruct_checkpoint.pt"
       weights_link = "http://data.bioembeddings.com/public/embeddings/feature_models/t5/secstruct_checkpoint.pt"
       model = SecStructCNN()
       return load_model(model, weights_link, checkpoint_p)
-  
+
     def label_mapping_3states(self):
         return {0:"H",1:"E",2:"L"} 
     
@@ -882,7 +884,7 @@ class ProtT5Microscope():
         for f in fmt:
             if f=="ss":
                 print("Loading secondary structure predictor")
-                p["ProtT5_SecStruct"] = SecStructPredictor(model_dir)
+                p["ProtT5_SecStruct"] = SecStructPredictor(model_dir, use_onnx=use_onnx_model)
                 r["SecStruct3"] = list() # 3-state secondary structure
                 r["SecStruct8"] = list() # 3-state secondary structure
                 
@@ -1040,12 +1042,30 @@ class ProtT5Microscope():
                         elif predictor_name=="VESPA_Conservation":
                             if use_onnx_model:
                                 ort_inputs = {predictor.model.get_inputs()[0].name: residue_embedding.numpy()}
-                                cons_Yhat = predictor.model.run(None, ort_inputs)
+                                # cons_Yhat = predictor.model.run(None, ort_inputs)
+                                cons_Yhat = predictor.model.run(None, {'input': residue_embedding.numpy()})
+                                with open("onnx_test.txt", "w") as f:
+                                    f.write(str(cons_Yhat))
                                 cons_Yhat = torch.from_numpy(np.float32(np.stack(cons_Yhat[0])))
                                 cons_Yhat = toCPU(torch.max( cons_Yhat, dim=-1, keepdim=True )[1]).astype(np.byte)
                             else:
                                 cons_Yhat = predictor.model(residue_embedding)
+                                with open("org_test.txt", "w") as f:
+                                    f.write(str(cons_Yhat))
                                 cons_Yhat = toCPU(torch.max( cons_Yhat, dim=-1, keepdim=True )[1]).astype(np.byte)
+                        # predict 3- and 8-state sec. struct
+                        elif predictor_name=="ProtT5_SecStruct":
+                            if use_onnx_model:
+                                ort_inputs = {predictor.model.get_inputs()[0].name: residue_embedding.numpy()}
+                                d3_Yhat, d8_Yhat = predictor.model.run(None, ort_inputs)
+                                d3_Yhat = torch.from_numpy(np.float32(np.stack(d3_Yhat)))
+                                d8_Yhat = torch.from_numpy(np.float32(np.stack(d8_Yhat)))
+
+                            else:
+                                d3_Yhat, d8_Yhat = predictor.model(residue_embedding)
+                            d3_Yhat = toCPU(torch.max( d3_Yhat, dim=-1, keepdim=True )[1] ).astype(np.byte)
+                            d8_Yhat = toCPU(torch.max( d8_Yhat, dim=-1, keepdim=True )[1] ).astype(np.byte)
+
                 for batch_idx, identifier in enumerate(seq_descriptions):
                     s_len = seq_lens[batch_idx] # get sequence length of query
                     self.ids.append(identifier ) # store IDs
@@ -1055,6 +1075,9 @@ class ProtT5Microscope():
                             self.results["Membrane"].append(mem_Yhat[batch_idx,:s_len])
                         elif predictor_name=="VESPA_Conservation":
                             self.results["Conservation"].append(cons_Yhat[batch_idx,:s_len])
+                        elif predictor_name=="ProtT5_SecStruct":
+                            self.results["SecStruct3"].append(d3_Yhat[batch_idx,:s_len])
+                            self.results["SecStruct8"].append(d8_Yhat[batch_idx,:s_len])
         exe_time = time.time()-start
         print('Total time for generating embeddings and gathering predictions: ' +
               '{:.2f} [s] ### Avg. time per protein: {:.3f} [s]'.format(
@@ -1319,6 +1342,7 @@ def load_model(model, weights_link, checkpoint_p,state_dict="state_dict"):
       global device
       if not device:
           device = get_device()
+      print(device)
       state = torch.load(checkpoint_p, map_location=device)
 
       model.load_state_dict(state[state_dict])
