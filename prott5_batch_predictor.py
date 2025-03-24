@@ -29,6 +29,12 @@ from tmbed_viterbi import Decoder
 
 from tqdm import tqdm
 
+import h5py
+
+import onnx
+import onnxruntime as ort
+
+
 
 def get_device(device: Union[None, str, torch.device] = None) -> torch.device:
     """Returns what the user specified, or defaults to the GPU,
@@ -41,6 +47,15 @@ def get_device(device: Union[None, str, torch.device] = None) -> torch.device:
         return torch.device("cuda")
     else:
         return torch.device("cpu")
+
+
+def read_h5_embeddings(file_path):
+    with h5py.File(file_path, 'r') as embeddings_file:
+        id2emb = {
+            embeddings_file[idx].attrs["original_id"]: np.array(embedding)
+            for idx, embedding in embeddings_file.items()
+        }
+    return id2emb
 
 
 # At the beginning, there was no device
@@ -237,13 +252,13 @@ class DisorderCNN( nn.Module ):
 class ConservationPredictor():
     def __init__(self, model_dir):
         self.model = self.load_model(model_dir)
-        
+
     def load_model(self, model_dir):
       checkpoint_p = model_dir / "conservation_checkpoint.pt"
       weights_link = "http://data.bioembeddings.com/public/embeddings/feature_models/prott5cons/checkpoint.pt"
       model = ConservationCNN()
       return load_model(model, weights_link, checkpoint_p)
-  
+
     def write_predictions(self, predictions, out_dir):
         out_p = out_dir / "conservation_pred.txt"
         with open(out_p, 'w+') as out_f:
@@ -258,17 +273,24 @@ class ConservationPredictor():
 # https://github.com/BernhoferM/TMbed
 class TMbed():
     
-    def __init__(self,model_dir):
-        model_dir = model_dir / "tmbed"
-        if  not model_dir.is_dir():
-            model_dir.mkdir()
-        self.model = self.load_model(model_dir)
+    def __init__(self,model_dir, use_onnx_model=False):
+
+        if use_onnx_model:
+            model_dir = f'{model_dir}/tmbed_onnx'
+            if not Path(model_dir).is_dir():
+                print('Tmbed onnx model does not exist.')
+            self.model = self.load_model_onnx(model_dir)
+        else:
+            model_dir = model_dir / "tmbed"
+            if  not model_dir.is_dir():
+                model_dir.mkdir()
+            self.model = self.load_model(model_dir)
+
         self.decoder = Decoder().to(device)
-        
+
     def load_model(self,model_dir):
         model_names = ["cv_0.pt","cv_1.pt","cv_2.pt","cv_3.pt","cv_4.pt"]
         models = []
-        
         for model_file in model_names:
             model = Predictor()
             weights_link = "http://data.bioembeddings.com/public/embeddings/feature_models/tmbed/" + model_file
@@ -277,6 +299,14 @@ class TMbed():
             models.append( load_model(model,weights_link,checkpoint_p,state_dict="model").float() )
 
         return models
+
+    def load_model_onnx(self, model_dir):
+        models = []
+        for onnx_file in Path(model_dir).iterdir():
+            onnx_model = ort.InferenceSession(onnx_file)
+            models.append(onnx_model)
+        return models
+
 
     def pred2label(self):
         return {0: 'B', 1: 'b', 2: 'H', 3: 'h', 4: 'S', 5: 'i', 6: 'o'}
@@ -598,8 +628,8 @@ class Ember3D:
         # Import here to avoid unnecessary dependencies if 3D output is not wanted
         import sys
         sys.path.insert(0, './EMBER3D')
-        from model import RF_1I1F
-        from Ember3D import Ember3D_Result
+        from EMBER3D.model import RF_1I1F
+        from EMBER3D.Ember3D import Ember3D_Result
         checkpoint_p = model_dir / "EMBER3D.model"
         weights_link = 'https://github.com/kWeissenow/EMBER3D/raw/main/model/EMBER3D.model'
         
@@ -803,8 +833,10 @@ class ProtGPT2():
 # various protein properties
 class ProtT5Microscope():
     
-    def __init__( self, seq_dict, model_dir, fmt ):
-        self.predictors, self.results = self.register_predictors(model_dir,fmt)
+    def __init__( self, seq_dict, model_dir, fmt, use_onnx_model=False):
+        self.predictors, self.results = self.register_predictors(model_dir,
+                                                                 fmt,
+                                                                 use_onnx_model=use_onnx_model)
         # only output attention heads if 3D output is requested
         output_attentions=True if "EMBER3D" in self.predictors else False
             
@@ -816,7 +848,7 @@ class ProtT5Microscope():
         self.sigm = nn.Sigmoid()
     
     
-    def register_predictors(self,model_dir,fmt):
+    def register_predictors(self, model_dir, fmt, use_onnx_model:bool):
         '''
 
         Parameters
@@ -824,7 +856,9 @@ class ProtT5Microscope():
         model_dir : PATH
             Path to the checkpoint directory 
         fmt : LIST
-            list of predictors to run 
+            list of predictors to run
+        use_onnx_model : BOOL
+            If the model should be loaded from an onnx file
 
         Returns
         -------
@@ -858,7 +892,7 @@ class ProtT5Microscope():
                 
             elif f=="mem":
                 print("Loading transmembrane predictor")
-                p["TMbed"] = TMbed(model_dir)
+                p["TMbed"] = TMbed(model_dir=model_dir, use_onnx_model=use_onnx_model)
                 r["Membrane"] = list()
                 
             elif f=="bind":
@@ -926,7 +960,90 @@ class ProtT5Microscope():
         
         print("Finished loading: {} in {:.1f}[s]".format(transformer_name,time.time()-start))
         return model, tokenizer
-    
+
+    def batch_predict_resedues_from_loaded_embs(self,
+                                                path_to_embeddings='Embeddings/Rostlab_prot_t5_xl_uniref50.h5',
+                                                max_batch_size=100, max_residues=4000,
+                                                use_onnx_model=False):
+        embeddings = read_h5_embeddings(file_path=path_to_embeddings)
+        sorted_seqs = sorted(embeddings.items(), key=lambda kv: len(embeddings[kv[0]]),
+                             reverse=True)
+        batch = list()
+        start = time.time()
+        for seq_idx, (seq_description, embedded_seq) in tqdm(enumerate(sorted_seqs, 1)):
+            seq_len = len(embedded_seq)
+            batch.append((seq_description, embedded_seq, seq_len))
+            n_res_batch = sum([s_len for _, _, s_len in batch]) + seq_len
+
+            # if not enough sequences were accumulated to process one batch continue
+            if not (len(batch) >= max_batch_size or  # max. number of sequences per batch
+                    n_res_batch >= max_residues or  # max. number of residues per batch
+                    seq_idx == len(sorted_seqs)  # special case: last batch
+            ):
+                continue
+            else:
+                seq_descriptions, embedded_seqs, seq_lens = zip(*batch)
+                batch = list()
+
+                # Manual padding
+                max_length = max(array.shape[0] for array in embedded_seqs)
+                padded_arrays = []
+                attention_masks = []
+
+                for array in embedded_seqs:
+                    padding = ((0, max_length - array.shape[0]), (0, 0))  # ((Pad oben, Pad unten), (Pad links, Pad rechts))
+                    padded_array = np.pad(array, padding, mode='constant', constant_values=0)
+                    attention_mask = np.ones(array.shape[0], dtype=int)
+                    pad_mask = np.zeros(max_length - array.shape[0], dtype=int)
+                    full_attention_mask = np.concatenate([attention_mask, pad_mask])
+                    padded_arrays.append(padded_array)
+                    attention_masks.append(full_attention_mask)
+
+                padded_arrays = np.stack(padded_arrays)
+                attention_mask_numpy = np.float32(np.stack(attention_masks))
+                attention_mask = torch.from_numpy(attention_mask_numpy)
+                residue_embedding = torch.from_numpy(np.float32(padded_arrays))
+                protein_embeddings = []
+                for idx, s_len in enumerate(seq_lens):
+                    # get per-protein embeddings here (take padding into account)
+                    protein_embeddings.append(residue_embedding[idx,:s_len].mean(dim=0) )
+                # stack them again in one tensor for batch-processing
+                #protein_embeddings=torch.vstack(protein_embeddings)
+                with torch.no_grad():
+                    for predictor_name, predictor in self.predictors.items():
+
+                        if predictor_name=="TMbed":
+                            # for each registered predictor
+                            B,L,_ = residue_embedding.shape
+                            # prediction container to gather ensemble predictions
+                            # 5 due to an ensemble of 5 models
+                            pred = torch.zeros((B, 5, L), device=device,dtype=torch.float32)
+                            for model in predictor.model:
+                                if use_onnx_model:
+                                    ort_inputs = {'input': residue_embedding.numpy(),
+                                                  'mask': attention_mask.numpy()}
+                                    y = model.run(None, ort_inputs)
+                                    y = torch.from_numpy(np.float32(np.stack(y[0])))
+                                else:
+                                    # TMbed has a normalization layer --> use fp32 for stability
+                                    y = model(residue_embedding.float(), attention_mask.float())
+                                pred = pred + torch.softmax(y, dim=1)
+
+                            probabilities = (pred / len(predictor.model))
+                            mem_Yhat = toCPU( predictor.decoder(probabilities, attention_mask) ).astype(np.byte)
+                for batch_idx, identifier in enumerate(seq_descriptions):
+                    s_len = seq_lens[batch_idx] # get sequence length of query
+                    self.ids.append(identifier ) # store IDs
+                    self.seqs.append(embedded_seqs[batch_idx]) # store sequence
+                    for predictor_name, predictor in self.predictors.items():
+                        if predictor_name=="TMbed":
+                            self.results["Membrane"].append(mem_Yhat[batch_idx,:s_len])
+        exe_time = time.time()-start
+        print('Total time for generating embeddings and gathering predictions: ' +
+              '{:.2f} [s] ### Avg. time per protein: {:.3f} [s]'.format(
+                  exe_time, exe_time/len(self.ids) ))
+        return None
+
     def batch_predict_residues( self, max_batch_size=100, max_residues=4000):
         sorted_seqs = sorted( self.seq_dict.items(), key=lambda kv: len( self.seq_dict[kv[0]] ), reverse=True )
         batch = list()
@@ -1183,7 +1300,8 @@ def load_model(model, weights_link, checkpoint_p,state_dict="state_dict"):
       # Torch load will map back to device from state, which often is GPU:0.
       # to overcome, need to explicitly map to active device
       global device
-
+      if not device:
+          device = get_device()
       state = torch.load(checkpoint_p, map_location=device)
 
       model.load_state_dict(state[state_dict])
@@ -1255,8 +1373,8 @@ def create_arg_parser():
                     help='The number of sequences in a ProtT5 batch.')
 
     # Optional positional argument
-    parser.add_argument( '-r', '--residues_per_batch', required=False, type=int, default=4000, 
-                    help='The max number of residues in a ProtT5 batch.')                   
+    parser.add_argument( '-r', '--residues_per_batch', required=False, type=int, default=4000,
+                    help='The max number of residues in a ProtT5 batch.')
     
     # Optional positional argument
     parser.add_argument( '-f', '--fmt', required=False, type=str, default="ss,cons,dis,mem,bind,go,subcell,tucker", 
@@ -1291,7 +1409,10 @@ def create_arg_parser():
                         ss,cons,dis,mem,bind,go,subcell,tucker,ember,emb
                     """
                     )
-
+    parser.add_argument( '-e', '--embeddings_from_file', required=False, type=str, default='',
+                         help='Path to a .h5-File where ProtT5 Embeddings are stored. Leave empty if you want to calculate new embeddings')
+    parser.add_argument( '-x', '--onnx', required=False,action="store_true",
+                         help='If the model should be loaded from an onnx file.')
     return parser
 
 
@@ -1331,18 +1452,24 @@ def main():
     out_dir  = Path( args.output)
     if not out_dir.is_dir():
         out_dir.mkdir()
-        
+
     # Load model(s) and generate predictions
-    microscope=ProtT5Microscope(seq_dict,model_dir,fmt)
-    microscope.batch_predict_residues(max_batch_size=args.batch_size, max_residues=args.residues_per_batch)
+    microscope=ProtT5Microscope(seq_dict,model_dir,fmt, use_onnx_model=args.onnx)
+    if args.embeddings_from_file:
+        microscope.batch_predict_resedues_from_loaded_embs(path_to_embeddings=args.embeddings_from_file,
+                                                           max_batch_size=args.batch_size,
+                                                           max_residues=args.residues_per_batch,
+                                                           use_onnx_model=args.onnx)
+    else:
+        microscope.batch_predict_residues(max_batch_size=args.batch_size,
+                                          max_residues=args.residues_per_batch)
+        # write sequences
+        seq_out_p = out_dir / "seqs.txt"
+        microscope.write_list(microscope.seqs, seq_out_p)
 
     # write IDs
     id_out_p = out_dir / "ids.txt"
     microscope.write_list(microscope.ids,id_out_p)
-    
-    # write sequences
-    seq_out_p = out_dir / "seqs.txt"
-    microscope.write_list(microscope.seqs, seq_out_p)
     
     
     for f in fmt:
