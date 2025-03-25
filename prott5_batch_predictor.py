@@ -33,6 +33,7 @@ import h5py
 
 import onnx
 import onnxruntime as ort
+from onnxruntime.capi.onnxruntime_pybind11_state import NoSuchFile
 
 
 
@@ -112,17 +113,16 @@ class LightAttention(nn.Module):
         """
         Args:
             x: [batch_size, embeddings_dim, sequence_length] embedding tensor that should be classified
-            mask: [batch_size, sequence_length] mask corresponding to the zero padding used for the shorter sequecnes in the batch. All values corresponding to padding are False and the rest is True.
+            mask: [batch_size, sequence_length] mask corresponding to the zero padding used for the shorter sequences in the batch. All values corresponding to padding are False and the rest is True.
         Returns:
             classification: [batch_size,output_dim] tensor with logits
         """
         o = self.feature_convolution(x)  # [batch_size, embeddings_dim, sequence_length]
         o = self.dropout(o)  # [batch_gsize, embeddings_dim, sequence_length]
         attention = self.attention_convolution(x)  # [batch_size, embeddings_dim, sequence_length]
-
         # mask out the padding to which we do not want to pay any attention (we have the padding because the sequences have different lenghts).
         # This padding is added by the dataloader when using the padded_permuted_collate function in utils/general.py
-        attention = attention.masked_fill(mask[:, None, :] == False, torch.tensor(-1e+4))
+        attention = attention.masked_fill(mask[:, None, :] == 0, torch.tensor(-1e+4))
 
         # code used for extracting embeddings for UMAP visualizations
         # extraction =  torch.sum(x * self.softmax(attention), dim=-1)
@@ -582,13 +582,33 @@ class ProtTucker():
 
 #### Protein-level predictors
 class LA():
-    def __init__(self, model_dir, output_dim):
-        model_dir = model_dir / "light_attention"
-        if  not model_dir.is_dir():
-            model_dir.mkdir()
+    def __init__(self, model_dir, output_dim, use_onnx=False):
         self.subcell=True if output_dim==10 else False
-        self.model = self.load_model(model_dir, output_dim)
-    
+        if use_onnx:
+            model_dir = model_dir / "light_attention_onnx"
+            if  not model_dir.is_dir():
+                print(f"No light attention model available. The onnx model must be at {model_dir}")
+            if self.subcell:
+                la_subcell_model_path = f"{model_dir}/la_subcell.onnx"
+                try:
+                    self.model = ort.InferenceSession(la_subcell_model_path)
+                except NoSuchFile:
+                    print(f"ERROR: No onnx LA subcell model at path {la_subcell_model_path}.")
+                    quit()
+            else:
+                la_model_path = f"{model_dir}/la.onnx"
+                try:
+                    self.model = ort.InferenceSession(la_model_path)
+                except NoSuchFile:
+                    print(f"ERROR: No onnx LA model at path {la_model_path}.")
+                    quit()
+
+        else:
+            model_dir = model_dir / "light_attention"
+            if  not model_dir.is_dir():
+                model_dir.mkdir()
+            self.model = self.load_model(model_dir, output_dim)
+
     def load_model(self, model_dir, output_dim):
         if self.subcell:
             checkpoint_p = model_dir / "la_prott5_subcellular_localization.pt"
@@ -600,7 +620,7 @@ class LA():
         model = LightAttention(output_dim=output_dim)
         # LA has a normalization layer --> cast to fp32 for stability
         return load_model(model,weights_link,checkpoint_p).float()
-    
+
     # https://github.com/sacdallago/bio_embeddings/blob/develop/bio_embeddings/extract/light_attention/light_attention_annotation_extractor.py#L15
     def class2label(self):
         if self.subcell:
@@ -628,7 +648,7 @@ class LA():
             out_p = out_dir / "la_subcell_pred.txt"
         else:
             out_p = out_dir / "la_mem_pred.txt"
-            
+
         with open(out_p, 'w+') as out_f:
             out_f.write( '\n'.join( [ class2label[pred] for pred in predictions] ) )
         return None
@@ -932,8 +952,8 @@ class ProtT5Microscope():
                 
             elif f=="subcell":
                 print("Loading subcellular location predictor")
-                p["LA-subcell"] = LA(model_dir,output_dim=10)
-                p["LA-mem"] = LA(model_dir,output_dim=2)
+                p["LA-subcell"] = LA(model_dir,output_dim=10, use_onnx=use_onnx_model)
+                p["LA-mem"] = LA(model_dir,output_dim=2, use_onnx=use_onnx_model)
                 r["Subcell"] = list()
                 r["LA-mem"] = list()
                 
@@ -1094,6 +1114,28 @@ class ProtT5Microscope():
                             # B x 3 x L --> B x L x 3
                             bind_Yhat = torch.permute(bind_Yhat,(0,2,1))
                             bind_Yhat = toCPU(bind_Yhat>0.5).astype(np.byte)
+                        ### Protein-level predictions ###
+                        # Light-attention predicts 10 subcellular localizations
+                        elif predictor_name=="LA-subcell":
+                            if use_onnx_model:
+                                ort_inputs = {'input': residue_embedding_transpose.numpy(),
+                                              'mask': attention_mask.numpy()}
+                                subcell_Yhat = predictor.model.run(None, ort_inputs)
+                                subcell_Yhat = torch.from_numpy(np.float32(np.stack(subcell_Yhat[0])))
+                            else:
+                                # Light attention has a batch-norm layer --> use fp32 for stability
+                                subcell_Yhat = predictor.model(residue_embedding_transpose.float(),attention_mask)
+                            subcell_Yhat = toCPU(torch.max(subcell_Yhat, dim=1)[1]).astype(np.byte)
+                        # Light-attention predicts also membrane-bound vs water-soluble
+                        elif predictor_name=="LA-mem":
+                            if use_onnx_model:
+                                ort_inputs = {'input': residue_embedding_transpose.numpy(),
+                                              'mask': attention_mask.numpy()}
+                                la_mem_Yhat = predictor.model.run(None, ort_inputs)
+                                la_mem_Yhat = torch.from_numpy(np.float32(np.stack(la_mem_Yhat[0])))
+                            else:
+                                la_mem_Yhat = predictor.model(residue_embedding_transpose.float(),attention_mask)
+                            la_mem_Yhat = toCPU(torch.max(la_mem_Yhat, dim=1)[1]).astype(np.byte)
 
                 for batch_idx, identifier in enumerate(seq_descriptions):
                     s_len = seq_lens[batch_idx] # get sequence length of query
@@ -1109,6 +1151,10 @@ class ProtT5Microscope():
                             self.results["SecStruct8"].append(d8_Yhat[batch_idx,:s_len])
                         elif predictor_name=="BindEmbed21DL":
                             self.results["Binding"].append(bind_Yhat[batch_idx,:s_len,:])
+                        elif predictor_name=="LA-subcell":
+                            self.results["Subcell"].append(subcell_Yhat[batch_idx])
+                        elif predictor_name=="LA-mem":
+                            self.results["LA-mem"].append(la_mem_Yhat[batch_idx])
         exe_time = time.time()-start
         print('Total time for generating embeddings and gathering predictions: ' +
               '{:.2f} [s] ### Avg. time per protein: {:.3f} [s]'.format(
@@ -1352,6 +1398,7 @@ def eat(lookup_embs, lookup_ids, lookup_labels, queries,threshold, norm=2):
 def download_file(url,local_path):
     if not local_path.parent.is_dir():
         local_path.parent.mkdir()
+        
     print("Downloading: {}".format(url))
     req = request.Request(url, headers={
           'User-Agent' : 'Mozilla/5.0 (Windows NT 6.1; Win64; x64)'
