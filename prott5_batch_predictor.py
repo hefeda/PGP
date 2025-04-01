@@ -31,7 +31,6 @@ from tqdm import tqdm
 
 import h5py
 
-import onnx
 import onnxruntime as ort
 from onnxruntime.capi.onnxruntime_pybind11_state import NoSuchFile
 
@@ -330,15 +329,22 @@ class TMbed():
        
 # https://github.com/DagmarIlz/SETH
 class SETH():
-    def __init__(self,model_dir):
-        model_dir = model_dir / "seth"
-        if not model_dir.is_dir():
-            model_dir.mkdir()
-            
-        self.model = self.load_model(model_dir)
+    def __init__(self,model_dir, use_onnnx_model=False):
+        if use_onnnx_model:
+            model_path = f'{model_dir}/seth_onnx/seth.onnx'
+            if not Path(model_dir).is_dir():
+                print(f'SETH onnx model does not exist or is not at the correct location ({model_dir}.')
+            self.model = ort.InferenceSession(model_path)
+        else:
+            model_dir = model_dir / "seth"
+            if not model_dir.is_dir():
+                model_dir.mkdir()
+            self.model = self.load_model(model_dir)
         
     def load_model(self,model_dir):
         checkpoint_p = model_dir / "seth_checkpoint.pt"
+        # Weight link doens't work -> weight was downloaded from the original repo
+        # https://github.com/DagmarIlz/SETH/blob/main/CNN/CNN.pt
         weights_link = "https://rostlab.org/~deepppi/SETH_CNN.pt"
         model = DisorderCNN()
         return load_model(model, weights_link, checkpoint_p)
@@ -928,7 +934,7 @@ class ProtT5Microscope():
                 
             elif f=="dis":
                 print("Loading disorder predictor")
-                p["SETH"] = SETH(model_dir)
+                p["SETH"] = SETH(model_dir, use_onnnx_model=use_onnx_model)
                 r["Disorder"] = list()
                 
             elif f=="mem":
@@ -1136,6 +1142,13 @@ class ProtT5Microscope():
                             else:
                                 la_mem_Yhat = predictor.model(residue_embedding_transpose.float(),attention_mask)
                             la_mem_Yhat = toCPU(torch.max(la_mem_Yhat, dim=1)[1]).astype(np.byte)
+                        elif predictor_name=="SETH":
+                            if use_onnx_model:
+                                ort_inputs = {predictor.model.get_inputs()[0].name: residue_embedding.numpy()}
+                                diso_Yhat = predictor.model.run(None, ort_inputs)
+                                diso_Yhat = toCPU(torch.from_numpy(np.float32(np.stack(diso_Yhat[0]))))
+                            else:
+                                diso_Yhat = toCPU( predictor.model(residue_embedding) )
 
                 for batch_idx, identifier in enumerate(seq_descriptions):
                     s_len = seq_lens[batch_idx] # get sequence length of query
@@ -1155,6 +1168,8 @@ class ProtT5Microscope():
                             self.results["Subcell"].append(subcell_Yhat[batch_idx])
                         elif predictor_name=="LA-mem":
                             self.results["LA-mem"].append(la_mem_Yhat[batch_idx])
+                        elif predictor_name=="SETH":
+                            self.results["Disorder"].append(diso_Yhat[batch_idx,:s_len])
         exe_time = time.time()-start
         print('Total time for generating embeddings and gathering predictions: ' +
               '{:.2f} [s] ### Avg. time per protein: {:.3f} [s]'.format(
