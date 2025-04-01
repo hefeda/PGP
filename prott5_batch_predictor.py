@@ -249,10 +249,14 @@ class DisorderCNN( nn.Module ):
 #### Residue-level Predictors
 # https://github.com/Rostlab/VESPA
 class ConservationPredictor():
-    def __init__(self, model_dir, use_onnx=False):
-        if use_onnx:
+    def __init__(self, model_dir, use_onnx_model=False):
+        if use_onnx_model:
             model_path = f'{model_dir}/conservation_onnx/conservation.onnx'
-            self.model = ort.InferenceSession(model_path)
+            try:
+                self.model = ort.InferenceSession(model_path)
+            except NoSuchFile:
+                print(f"ERROR: No onnx SETH model at path {model_path}.")
+                quit()
         else:
             self.model = self.load_model(model_dir)
 
@@ -277,11 +281,8 @@ class ConservationPredictor():
 class TMbed():
     
     def __init__(self,model_dir, use_onnx_model=False):
-
         if use_onnx_model:
             model_dir = f'{model_dir}/tmbed_onnx'
-            if not Path(model_dir).is_dir():
-                print('Tmbed onnx model does not exist.')
             self.model = self.load_model_onnx(model_dir)
         else:
             model_dir = model_dir / "tmbed"
@@ -306,8 +307,12 @@ class TMbed():
     def load_model_onnx(self, model_dir):
         models = []
         for onnx_file in Path(model_dir).iterdir():
-            onnx_model = ort.InferenceSession(onnx_file)
-            models.append(onnx_model)
+            try:
+                onnx_model = ort.InferenceSession(onnx_file)
+                models.append(onnx_model)
+            except NoSuchFile:
+                print(f"ERROR: No onnx TMbed model at path {onnx_file}.")
+                quit()
         return models
 
 
@@ -332,9 +337,11 @@ class SETH():
     def __init__(self,model_dir, use_onnnx_model=False):
         if use_onnnx_model:
             model_path = f'{model_dir}/seth_onnx/seth.onnx'
-            if not Path(model_dir).is_dir():
-                print(f'SETH onnx model does not exist or is not at the correct location ({model_dir}.')
-            self.model = ort.InferenceSession(model_path)
+            try:
+                self.model = ort.InferenceSession(model_path)
+            except NoSuchFile:
+                print(f"ERROR: No onnx SETH model at path {model_path}.")
+                quit()
         else:
             model_dir = model_dir / "seth"
             if not model_dir.is_dir():
@@ -379,8 +386,12 @@ class BindPredict():
     def load_models_onnx(self, model_dir):
         models = []
         for onnx_file in Path(model_dir).iterdir():
-            onnx_model = ort.InferenceSession(onnx_file)
-            models.append(onnx_model)
+            try:
+                onnx_model = ort.InferenceSession(onnx_file)
+                models.append(onnx_model)
+            except NoSuchFile:
+                print(f"ERROR: No onnx SETH model at path {onnx_file}.")
+                quit()
         return models
 
     def load_model(self,model_dir):
@@ -412,10 +423,14 @@ class BindPredict():
         return None
     
 class SecStructPredictor():
-    def __init__(self, model_dir, use_onnx=False):
-        if use_onnx:
+    def __init__(self, model_dir, use_onnx_model=False):
+        if use_onnx_model:
             model_path = f'{model_dir}/sec_struct_onnx/secstruct.onnx'
-            self.model = ort.InferenceSession(model_path)
+            try:
+                self.model = ort.InferenceSession(model_path)
+            except NoSuchFile:
+                print(f"ERROR: No onnx SETH model at path {model_path}.")
+                quit()
         else:
             model_dir = model_dir / "prott5_sec_struct"
             if  not model_dir.is_dir():
@@ -588,9 +603,9 @@ class ProtTucker():
 
 #### Protein-level predictors
 class LA():
-    def __init__(self, model_dir, output_dim, use_onnx=False):
+    def __init__(self, model_dir, output_dim, use_onnx_model=False):
         self.subcell=True if output_dim==10 else False
-        if use_onnx:
+        if use_onnx_model:
             model_dir = model_dir / "light_attention_onnx"
             if  not model_dir.is_dir():
                 print(f"No light attention model available. The onnx model must be at {model_dir}")
@@ -923,13 +938,13 @@ class ProtT5Microscope():
         for f in fmt:
             if f=="ss":
                 print("Loading secondary structure predictor")
-                p["ProtT5_SecStruct"] = SecStructPredictor(model_dir, use_onnx=use_onnx_model)
+                p["ProtT5_SecStruct"] = SecStructPredictor(model_dir, use_onnx_model=use_onnx_model)
                 r["SecStruct3"] = list() # 3-state secondary structure
                 r["SecStruct8"] = list() # 3-state secondary structure
                 
             elif f=="cons":
                 print("Loading conservation predictor")
-                p["VESPA_Conservation"] = ConservationPredictor(model_dir=model_dir, use_onnx=use_onnx_model)
+                p["VESPA_Conservation"] = ConservationPredictor(model_dir=model_dir, use_onnx_model=use_onnx_model)
                 r["Conservation"] = list()
                 
             elif f=="dis":
@@ -958,8 +973,8 @@ class ProtT5Microscope():
                 
             elif f=="subcell":
                 print("Loading subcellular location predictor")
-                p["LA-subcell"] = LA(model_dir,output_dim=10, use_onnx=use_onnx_model)
-                p["LA-mem"] = LA(model_dir,output_dim=2, use_onnx=use_onnx_model)
+                p["LA-subcell"] = LA(model_dir, output_dim=10, use_onnx_model=use_onnx_model)
+                p["LA-mem"] = LA(model_dir, output_dim=2, use_onnx_model=use_onnx_model)
                 r["Subcell"] = list()
                 r["LA-mem"] = list()
                 
@@ -1176,7 +1191,7 @@ class ProtT5Microscope():
                   exe_time, exe_time/len(self.ids) ))
         return None
 
-    def batch_predict_residues( self, max_batch_size=100, max_residues=4000):
+    def batch_predict_residues( self, max_batch_size=100, max_residues=4000, use_onnx_model=False):
         sorted_seqs = sorted( self.seq_dict.items(), key=lambda kv: len( self.seq_dict[kv[0]] ), reverse=True )
         batch = list()
         print("Start predicting protein properties ...")
@@ -1243,29 +1258,53 @@ class ProtT5Microscope():
                         
                         ### Residue-level predictions ###
                         # predict 3- and 8-state sec. struct
-                        if predictor_name=="ProtT5_SecStruct": 
-                            d3_Yhat, d8_Yhat = predictor.model(residue_embedding)
+                        if predictor_name=="ProtT5_SecStruct":
+                            if use_onnx_model:
+                                ort_inputs = {predictor.model.get_inputs()[0].name: residue_embedding.numpy()}
+                                d3_Yhat, d8_Yhat = predictor.model.run(None, ort_inputs)
+                                d3_Yhat = torch.from_numpy(np.float32(np.stack(d3_Yhat)))
+                                d8_Yhat = torch.from_numpy(np.float32(np.stack(d8_Yhat)))
+
+                            else:
+                                d3_Yhat, d8_Yhat = predictor.model(residue_embedding)
                             d3_Yhat = toCPU(torch.max( d3_Yhat, dim=-1, keepdim=True )[1] ).astype(np.byte)
                             d8_Yhat = toCPU(torch.max( d8_Yhat, dim=-1, keepdim=True )[1] ).astype(np.byte)
                             
                         elif predictor_name=="VESPA_Conservation":
-                            cons_Yhat = predictor.model(residue_embedding)
-                            cons_Yhat = toCPU(torch.max( cons_Yhat, dim=-1, keepdim=True )[1]).astype(np.byte)
+                            if use_onnx_model:
+                                ort_inputs = {predictor.model.get_inputs()[0].name: residue_embedding.numpy()}
+                                cons_Yhat = predictor.model.run(None, ort_inputs)
+                                cons_Yhat = torch.from_numpy(np.float32(np.stack(cons_Yhat[0])))
+                                cons_Yhat = toCPU(torch.max( cons_Yhat, dim=-1, keepdim=True )[1]).astype(np.byte)
+                            else:
+                                cons_Yhat = predictor.model(residue_embedding)
+                                cons_Yhat = toCPU(torch.max( cons_Yhat, dim=-1, keepdim=True )[1]).astype(np.byte)
                             
                         elif predictor_name=="SETH":
-                            diso_Yhat = toCPU( predictor.model(residue_embedding) )
+                            if use_onnx_model:
+                                ort_inputs = {predictor.model.get_inputs()[0].name: residue_embedding.numpy()}
+                                diso_Yhat = predictor.model.run(None, ort_inputs)
+                                diso_Yhat = toCPU(torch.from_numpy(np.float32(np.stack(diso_Yhat[0]))))
+                            else:
+                                diso_Yhat = toCPU( predictor.model(residue_embedding) )
                             
                         elif predictor_name=="TMbed":
+                            # for each registered predictor
                             B,L,_ = residue_embedding.shape
                             # prediction container to gather ensemble predictions
                             # 5 due to an ensemble of 5 models
                             pred = torch.zeros((B, 5, L), device=device,dtype=torch.float32)
-                            
                             for model in predictor.model:
-                                # TMbed has a normalization layer --> use fp32 for stability
-                                y = model(residue_embedding.float(), attention_mask.float())
+                                if use_onnx_model:
+                                    ort_inputs = {'input': residue_embedding.numpy(),
+                                                  'mask': attention_mask.numpy()}
+                                    y = model.run(None, ort_inputs)
+                                    y = torch.from_numpy(np.float32(np.stack(y[0])))
+                                else:
+                                    # TMbed has a normalization layer --> use fp32 for stability
+                                    y = model(residue_embedding.float(), attention_mask.float())
                                 pred = pred + torch.softmax(y, dim=1)
-                                
+
                             probabilities = (pred / len(predictor.model))
                             mem_Yhat = toCPU( predictor.decoder(probabilities, attention_mask) ).astype(np.byte)
                         
@@ -1274,7 +1313,14 @@ class ProtT5Microscope():
                             # container for adding predictions of individual models in the ensemble
                             ensemble_container = torch.zeros( (B, 3, L), device=device,dtype=torch.float16)
                             for model in predictor.model: # for each model in the ensemble
-                                pred = self.sigm( model(residue_embedding_transpose) )
+                                if use_onnx_model:
+                                    ort_inputs = {model.get_inputs()[0].name: residue_embedding_transpose.numpy()}
+                                    model_output_numpy = model.run(None, ort_inputs)
+                                    model_output_torch = torch.from_numpy(np.float32(np.stack(model_output_numpy[0])))
+                                    pred = self.sigm(model_output_torch)
+                                    pred = torch.from_numpy(np.float32(np.stack(pred)))
+                                else:
+                                    pred = self.sigm( model(residue_embedding_transpose) )
                                 ensemble_container = ensemble_container + pred
                             # normalize
                             bind_Yhat = ensemble_container / len(predictor.model)
@@ -1285,12 +1331,24 @@ class ProtT5Microscope():
                         ### Protein-level predictions ###
                         # Light-attention predicts 10 subcellular localizations
                         elif predictor_name=="LA-subcell":
-                            # Light attention has a batch-norm layer --> use fp32 for stability
-                            subcell_Yhat = predictor.model(residue_embedding_transpose.float(),attention_mask)
+                            if use_onnx_model:
+                                ort_inputs = {'input': residue_embedding_transpose.numpy(),
+                                              'mask': attention_mask.numpy().astype(int)}
+                                subcell_Yhat = predictor.model.run(None, ort_inputs)
+                                subcell_Yhat = torch.from_numpy(np.float32(np.stack(subcell_Yhat[0])))
+                            else:
+                                # Light attention has a batch-norm layer --> use fp32 for stability
+                                subcell_Yhat = predictor.model(residue_embedding_transpose.float(),attention_mask.int())
                             subcell_Yhat = toCPU(torch.max(subcell_Yhat, dim=1)[1]).astype(np.byte)
                         # Light-attention predicts also membrane-bound vs water-soluble
                         elif predictor_name=="LA-mem":
-                            la_mem_Yhat = predictor.model(residue_embedding_transpose.float(),attention_mask)
+                            if use_onnx_model:
+                                ort_inputs = {'input': residue_embedding_transpose.numpy(),
+                                              'mask': attention_mask.numpy().astype(int)}
+                                la_mem_Yhat = predictor.model.run(None, ort_inputs)
+                                la_mem_Yhat = torch.from_numpy(np.float32(np.stack(la_mem_Yhat[0])))
+                            else:
+                                la_mem_Yhat = predictor.model(residue_embedding_transpose.float(),attention_mask.int())
                             la_mem_Yhat = toCPU(torch.max(la_mem_Yhat, dim=1)[1]).astype(np.byte)
                         ### EAT-based methods ###
                         elif predictor_name=="ProtTucker":
@@ -1388,6 +1446,7 @@ def eat(lookup_embs, lookup_ids, lookup_labels, queries,threshold, norm=2):
     pdist = torch.cdist(lookup_embs, queries.unsqueeze(dim=0), p=norm).squeeze(dim=0)
 
     # get closes neighbor for each query
+    nn_dists, nn_idxs = torch.topk(pdist, 1, largest=False, dim=0)
     nn_dists, nn_idxs = torch.topk(pdist, 1, largest=False, dim=0)
 
     predictions=list()
