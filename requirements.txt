@@ -76,3 +76,5 @@ typer==0.6.1
 typing_extensions==4.3.0
 urllib3==1.26.10
 zipp==3.8.1
+onnx
+onnxruntime

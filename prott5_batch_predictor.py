@@ -29,8 +29,7 @@ from tmbed_viterbi import Decoder
 
 from tqdm import tqdm
 
-import h5py
-
+# ONNX:
 import onnxruntime as ort
 from onnxruntime.capi.onnxruntime_pybind11_state import NoSuchFile
 
@@ -47,15 +46,6 @@ def get_device(device: Union[None, str, torch.device] = None) -> torch.device:
         return torch.device("cuda")
     else:
         return torch.device("cpu")
-
-
-def read_h5_embeddings(file_path):
-    with h5py.File(file_path, 'r') as embeddings_file:
-        id2emb = {
-            embeddings_file[idx].attrs["original_id"]: np.array(embedding)
-            for idx, embedding in embeddings_file.items()
-        }
-    return id2emb
 
 
 # At the beginning, there was no device
@@ -1023,173 +1013,6 @@ class ProtT5Microscope():
         print("Finished loading: {} in {:.1f}[s]".format(transformer_name,time.time()-start))
         return model, tokenizer
 
-    def batch_predict_resedues_from_loaded_embs(self,
-                                                path_to_embeddings='Embeddings/Rostlab_prot_t5_xl_uniref50.h5',
-                                                max_batch_size=100, max_residues=4000,
-                                                use_onnx_model=False):
-        embeddings = read_h5_embeddings(file_path=path_to_embeddings)
-        sorted_seqs = sorted(embeddings.items(), key=lambda kv: len(embeddings[kv[0]]),
-                             reverse=True)
-        batch = list()
-        start = time.time()
-        for seq_idx, (seq_description, embedded_seq) in tqdm(enumerate(sorted_seqs, 1)):
-            seq_len = len(embedded_seq)
-            batch.append((seq_description, embedded_seq, seq_len))
-            n_res_batch = sum([s_len for _, _, s_len in batch]) + seq_len
-
-            # if not enough sequences were accumulated to process one batch continue
-            if not (len(batch) >= max_batch_size or  # max. number of sequences per batch
-                    n_res_batch >= max_residues or  # max. number of residues per batch
-                    seq_idx == len(sorted_seqs)  # special case: last batch
-            ):
-                continue
-            else:
-                seq_descriptions, embedded_seqs, seq_lens = zip(*batch)
-                batch = list()
-
-                # Manual padding
-                max_length = max(array.shape[0] for array in embedded_seqs)
-                padded_arrays = []
-                attention_masks = []
-
-                for array in embedded_seqs:
-                    padding = ((0, max_length - array.shape[0]), (0, 0))  # ((Pad oben, Pad unten), (Pad links, Pad rechts))
-                    padded_array = np.pad(array, padding, mode='constant', constant_values=0)
-                    attention_mask = np.ones(array.shape[0], dtype=int)
-                    pad_mask = np.zeros(max_length - array.shape[0], dtype=int)
-                    full_attention_mask = np.concatenate([attention_mask, pad_mask])
-                    padded_arrays.append(padded_array)
-                    attention_masks.append(full_attention_mask)
-
-                padded_arrays = np.stack(padded_arrays)
-                attention_mask_numpy = np.float32(np.stack(attention_masks))
-                attention_mask = torch.from_numpy(attention_mask_numpy)
-                residue_embedding = torch.from_numpy(np.float32(padded_arrays))
-                protein_embeddings = []
-                for idx, s_len in enumerate(seq_lens):
-                    # get per-protein embeddings here (take padding into account)
-                    protein_embeddings.append(residue_embedding[idx,:s_len].mean(dim=0) )
-                # stack them again in one tensor for batch-processing
-                #protein_embeddings=torch.vstack(protein_embeddings)
-                residue_embedding_transpose = torch.permute(residue_embedding, (0,2,1))
-
-                with torch.no_grad():
-                    for predictor_name, predictor in self.predictors.items():
-
-                        if predictor_name=="TMbed":
-                            # for each registered predictor
-                            B,L,_ = residue_embedding.shape
-                            # prediction container to gather ensemble predictions
-                            # 5 due to an ensemble of 5 models
-                            pred = torch.zeros((B, 5, L), device=device,dtype=torch.float32)
-                            for model in predictor.model:
-                                if use_onnx_model:
-                                    ort_inputs = {'input': residue_embedding.numpy(),
-                                                  'mask': attention_mask.numpy()}
-                                    y = model.run(None, ort_inputs)
-                                    y = torch.from_numpy(np.float32(np.stack(y[0])))
-                                else:
-                                    # TMbed has a normalization layer --> use fp32 for stability
-                                    y = model(residue_embedding.float(), attention_mask.float())
-                                pred = pred + torch.softmax(y, dim=1)
-
-                            probabilities = (pred / len(predictor.model))
-                            mem_Yhat = toCPU( predictor.decoder(probabilities, attention_mask) ).astype(np.byte)
-                        elif predictor_name=="VESPA_Conservation":
-                            if use_onnx_model:
-                                ort_inputs = {predictor.model.get_inputs()[0].name: residue_embedding.numpy()}
-                                cons_Yhat = predictor.model.run(None, ort_inputs)
-                                cons_Yhat = torch.from_numpy(np.float32(np.stack(cons_Yhat[0])))
-                                cons_Yhat = toCPU(torch.max( cons_Yhat, dim=-1, keepdim=True )[1]).astype(np.byte)
-                            else:
-                                cons_Yhat = predictor.model(residue_embedding)
-                                cons_Yhat = toCPU(torch.max( cons_Yhat, dim=-1, keepdim=True )[1]).astype(np.byte)
-                        # predict 3- and 8-state sec. struct
-                        elif predictor_name=="ProtT5_SecStruct":
-                            if use_onnx_model:
-                                ort_inputs = {predictor.model.get_inputs()[0].name: residue_embedding.numpy()}
-                                d3_Yhat, d8_Yhat = predictor.model.run(None, ort_inputs)
-                                d3_Yhat = torch.from_numpy(np.float32(np.stack(d3_Yhat)))
-                                d8_Yhat = torch.from_numpy(np.float32(np.stack(d8_Yhat)))
-
-                            else:
-                                d3_Yhat, d8_Yhat = predictor.model(residue_embedding)
-                            d3_Yhat = toCPU(torch.max( d3_Yhat, dim=-1, keepdim=True )[1] ).astype(np.byte)
-                            d8_Yhat = toCPU(torch.max( d8_Yhat, dim=-1, keepdim=True )[1] ).astype(np.byte)
-                        elif predictor_name=="BindEmbed21DL":
-                            B, L, _ = residue_embedding.shape
-                            # container for adding predictions of individual models in the ensemble
-                            ensemble_container = torch.zeros( (B, 3, L), device=device,dtype=torch.float16)
-                            for model in predictor.model: # for each model in the ensemble
-                                if use_onnx_model:
-                                    ort_inputs = {model.get_inputs()[0].name: residue_embedding_transpose.numpy()}
-                                    model_output_numpy = model.run(None, ort_inputs)
-                                    model_output_torch = torch.from_numpy(np.float32(np.stack(model_output_numpy[0])))
-                                    pred = self.sigm(model_output_torch)
-                                    pred = torch.from_numpy(np.float32(np.stack(pred)))
-                                else:
-                                    pred = self.sigm( model(residue_embedding_transpose) )
-                                ensemble_container = ensemble_container + pred
-                            # normalize
-                            bind_Yhat = ensemble_container / len(predictor.model)
-                            # B x 3 x L --> B x L x 3
-                            bind_Yhat = torch.permute(bind_Yhat,(0,2,1))
-                            bind_Yhat = toCPU(bind_Yhat>0.5).astype(np.byte)
-                        ### Protein-level predictions ###
-                        # Light-attention predicts 10 subcellular localizations
-                        elif predictor_name=="LA-subcell":
-                            if use_onnx_model:
-                                ort_inputs = {'input': residue_embedding_transpose.numpy(),
-                                              'mask': attention_mask.numpy()}
-                                subcell_Yhat = predictor.model.run(None, ort_inputs)
-                                subcell_Yhat = torch.from_numpy(np.float32(np.stack(subcell_Yhat[0])))
-                            else:
-                                # Light attention has a batch-norm layer --> use fp32 for stability
-                                subcell_Yhat = predictor.model(residue_embedding_transpose.float(),attention_mask)
-                            subcell_Yhat = toCPU(torch.max(subcell_Yhat, dim=1)[1]).astype(np.byte)
-                        # Light-attention predicts also membrane-bound vs water-soluble
-                        elif predictor_name=="LA-mem":
-                            if use_onnx_model:
-                                ort_inputs = {'input': residue_embedding_transpose.numpy(),
-                                              'mask': attention_mask.numpy()}
-                                la_mem_Yhat = predictor.model.run(None, ort_inputs)
-                                la_mem_Yhat = torch.from_numpy(np.float32(np.stack(la_mem_Yhat[0])))
-                            else:
-                                la_mem_Yhat = predictor.model(residue_embedding_transpose.float(),attention_mask)
-                            la_mem_Yhat = toCPU(torch.max(la_mem_Yhat, dim=1)[1]).astype(np.byte)
-                        elif predictor_name=="SETH":
-                            if use_onnx_model:
-                                ort_inputs = {predictor.model.get_inputs()[0].name: residue_embedding.numpy()}
-                                diso_Yhat = predictor.model.run(None, ort_inputs)
-                                diso_Yhat = toCPU(torch.from_numpy(np.float32(np.stack(diso_Yhat[0]))))
-                            else:
-                                diso_Yhat = toCPU( predictor.model(residue_embedding) )
-
-                for batch_idx, identifier in enumerate(seq_descriptions):
-                    s_len = seq_lens[batch_idx] # get sequence length of query
-                    self.ids.append(identifier ) # store IDs
-                    self.seqs.append(embedded_seqs[batch_idx]) # store sequence
-                    for predictor_name, predictor in self.predictors.items():
-                        if predictor_name=="TMbed":
-                            self.results["Membrane"].append(mem_Yhat[batch_idx,:s_len])
-                        elif predictor_name=="VESPA_Conservation":
-                            self.results["Conservation"].append(cons_Yhat[batch_idx,:s_len])
-                        elif predictor_name=="ProtT5_SecStruct":
-                            self.results["SecStruct3"].append(d3_Yhat[batch_idx,:s_len])
-                            self.results["SecStruct8"].append(d8_Yhat[batch_idx,:s_len])
-                        elif predictor_name=="BindEmbed21DL":
-                            self.results["Binding"].append(bind_Yhat[batch_idx,:s_len,:])
-                        elif predictor_name=="LA-subcell":
-                            self.results["Subcell"].append(subcell_Yhat[batch_idx])
-                        elif predictor_name=="LA-mem":
-                            self.results["LA-mem"].append(la_mem_Yhat[batch_idx])
-                        elif predictor_name=="SETH":
-                            self.results["Disorder"].append(diso_Yhat[batch_idx,:s_len])
-        exe_time = time.time()-start
-        print('Total time for generating embeddings and gathering predictions: ' +
-              '{:.2f} [s] ### Avg. time per protein: {:.3f} [s]'.format(
-                  exe_time, exe_time/len(self.ids) ))
-        return None
 
     def batch_predict_residues( self, max_batch_size=100, max_residues=4000, use_onnx_model=False):
         sorted_seqs = sorted( self.seq_dict.items(), key=lambda kv: len( self.seq_dict[kv[0]] ), reverse=True )
