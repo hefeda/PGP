@@ -79,7 +79,7 @@ python prott5_batch_predictor.py --input example_output/pp_examples.fasta --outp
 You have to make sure that the onnx-model is at /checkpoints/{modeltype}_onnx. It only works for the models listed [here](#models-which-support-precomputed-embeddings-and-onnx-exports).
 
 ### Models which support precomputed embeddings and onnx exports
-Tmbed, Conservation, Secondary Structure
+Tmbed, Conservation, Secondary Structure, Light Attention, SETH
 
 ## Reproducibility
 The datasets used for the analysis in the manuscript are available at: http://data.bioembeddings.com/public/design/.
