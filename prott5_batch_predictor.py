@@ -29,6 +29,11 @@ from tmbed_viterbi import Decoder
 
 from tqdm import tqdm
 
+# ONNX:
+import onnxruntime as ort
+from onnxruntime.capi.onnxruntime_pybind11_state import NoSuchFile
+
+
 
 def get_device(device: Union[None, str, torch.device] = None) -> torch.device:
     """Returns what the user specified, or defaults to the GPU,
@@ -97,17 +102,16 @@ class LightAttention(nn.Module):
         """
         Args:
             x: [batch_size, embeddings_dim, sequence_length] embedding tensor that should be classified
-            mask: [batch_size, sequence_length] mask corresponding to the zero padding used for the shorter sequecnes in the batch. All values corresponding to padding are False and the rest is True.
+            mask: [batch_size, sequence_length] mask corresponding to the zero padding used for the shorter sequences in the batch. All values corresponding to padding are False and the rest is True.
         Returns:
             classification: [batch_size,output_dim] tensor with logits
         """
         o = self.feature_convolution(x)  # [batch_size, embeddings_dim, sequence_length]
         o = self.dropout(o)  # [batch_gsize, embeddings_dim, sequence_length]
         attention = self.attention_convolution(x)  # [batch_size, embeddings_dim, sequence_length]
-
         # mask out the padding to which we do not want to pay any attention (we have the padding because the sequences have different lenghts).
         # This padding is added by the dataloader when using the padded_permuted_collate function in utils/general.py
-        attention = attention.masked_fill(mask[:, None, :] == False, torch.tensor(-1e+4))
+        attention = attention.masked_fill(mask[:, None, :] == 0, torch.tensor(-1e+4))
 
         # code used for extracting embeddings for UMAP visualizations
         # extraction =  torch.sum(x * self.softmax(attention), dim=-1)
@@ -235,15 +239,23 @@ class DisorderCNN( nn.Module ):
 #### Residue-level Predictors
 # https://github.com/Rostlab/VESPA
 class ConservationPredictor():
-    def __init__(self, model_dir):
-        self.model = self.load_model(model_dir)
-        
+    def __init__(self, model_dir, use_onnx_model=False):
+        if use_onnx_model:
+            model_path = f'{model_dir}/conservation_onnx/conservation.onnx'
+            try:
+                self.model = ort.InferenceSession(model_path)
+            except NoSuchFile:
+                print(f"ERROR: No onnx SETH model at path {model_path}.")
+                quit()
+        else:
+            self.model = self.load_model(model_dir)
+
     def load_model(self, model_dir):
       checkpoint_p = model_dir / "conservation_checkpoint.pt"
       weights_link = "http://data.bioembeddings.com/public/embeddings/feature_models/prott5cons/checkpoint.pt"
       model = ConservationCNN()
       return load_model(model, weights_link, checkpoint_p)
-  
+
     def write_predictions(self, predictions, out_dir):
         out_p = out_dir / "conservation_pred.txt"
         with open(out_p, 'w+') as out_f:
@@ -258,17 +270,17 @@ class ConservationPredictor():
 # https://github.com/BernhoferM/TMbed
 class TMbed():
     
-    def __init__(self,model_dir):
+    def __init__(self,model_dir, use_onnx_model=False):
+
         model_dir = model_dir / "tmbed"
         if  not model_dir.is_dir():
             model_dir.mkdir()
         self.model = self.load_model(model_dir)
         self.decoder = Decoder().to(device)
-        
+
     def load_model(self,model_dir):
         model_names = ["cv_0.pt","cv_1.pt","cv_2.pt","cv_3.pt","cv_4.pt"]
         models = []
-        
         for model_file in model_names:
             model = Predictor()
             weights_link = "http://data.bioembeddings.com/public/embeddings/feature_models/tmbed/" + model_file
@@ -296,15 +308,24 @@ class TMbed():
        
 # https://github.com/DagmarIlz/SETH
 class SETH():
-    def __init__(self,model_dir):
-        model_dir = model_dir / "seth"
-        if not model_dir.is_dir():
-            model_dir.mkdir()
-            
-        self.model = self.load_model(model_dir)
+    def __init__(self,model_dir, use_onnnx_model=False):
+        if use_onnnx_model:
+            model_path = f'{model_dir}/seth_onnx/seth.onnx'
+            try:
+                self.model = ort.InferenceSession(model_path)
+            except NoSuchFile:
+                print(f"ERROR: No onnx SETH model at path {model_path}.")
+                quit()
+        else:
+            model_dir = model_dir / "seth"
+            if not model_dir.is_dir():
+                model_dir.mkdir()
+            self.model = self.load_model(model_dir)
         
     def load_model(self,model_dir):
         checkpoint_p = model_dir / "seth_checkpoint.pt"
+        # Weight link doens't work -> weight was downloaded from the original repo
+        # https://github.com/DagmarIlz/SETH/blob/main/CNN/CNN.pt
         weights_link = "https://rostlab.org/~deepppi/SETH_CNN.pt"
         model = DisorderCNN()
         return load_model(model, weights_link, checkpoint_p)
@@ -324,12 +345,29 @@ class SETH():
 # https://github.com/Rostlab/bindPredict
 class BindPredict():
     
-    def __init__(self,model_dir):
-        model_dir = model_dir / "bindpredict"
-        if  not model_dir.is_dir():
-            model_dir.mkdir()
-        self.model = self.load_model(model_dir)
-        
+    def __init__(self,model_dir, use_onnx_model=False):
+        if use_onnx_model:
+            model_dir = model_dir / "bindpredict_onnx"
+            if  not Path(model_dir).is_dir():
+                print(f'BindPredict onnx model does not exist or is not at the correct location ({model_dir}.')
+            self.model = self.load_models_onnx(model_dir=model_dir)
+        else:
+            model_dir = model_dir / "bindpredict"
+            if  not model_dir.is_dir():
+                model_dir.mkdir()
+            self.model = self.load_model(model_dir)
+
+    def load_models_onnx(self, model_dir):
+        models = []
+        for onnx_file in Path(model_dir).iterdir():
+            try:
+                onnx_model = ort.InferenceSession(onnx_file)
+                models.append(onnx_model)
+            except NoSuchFile:
+                print(f"ERROR: No onnx SETH model at path {onnx_file}.")
+                quit()
+        return models
+
     def load_model(self,model_dir):
         model_names = ["checkpoint1.pt","checkpoint2.pt","checkpoint3.pt","checkpoint4.pt","checkpoint5.pt"]
         models = []
@@ -359,18 +397,26 @@ class BindPredict():
         return None
     
 class SecStructPredictor():
-    def __init__(self, model_dir):
-        model_dir = model_dir / "prott5_sec_struct"
-        if  not model_dir.is_dir():
-            model_dir.mkdir()
-        self.model = self.load_model(model_dir)
+    def __init__(self, model_dir, use_onnx_model=False):
+        if use_onnx_model:
+            model_path = f'{model_dir}/sec_struct_onnx/secstruct.onnx'
+            try:
+                self.model = ort.InferenceSession(model_path)
+            except NoSuchFile:
+                print(f"ERROR: No onnx SETH model at path {model_path}.")
+                quit()
+        else:
+            model_dir = model_dir / "prott5_sec_struct"
+            if  not model_dir.is_dir():
+                model_dir.mkdir()
+            self.model = self.load_model(model_dir)
         
     def load_model(self, model_dir):
       checkpoint_p = model_dir / "secstruct_checkpoint.pt"
       weights_link = "http://data.bioembeddings.com/public/embeddings/feature_models/t5/secstruct_checkpoint.pt"
       model = SecStructCNN()
       return load_model(model, weights_link, checkpoint_p)
-  
+
     def label_mapping_3states(self):
         return {0:"H",1:"E",2:"L"} 
     
@@ -531,13 +577,33 @@ class ProtTucker():
 
 #### Protein-level predictors
 class LA():
-    def __init__(self, model_dir, output_dim):
-        model_dir = model_dir / "light_attention"
-        if  not model_dir.is_dir():
-            model_dir.mkdir()
+    def __init__(self, model_dir, output_dim, use_onnx_model=False):
         self.subcell=True if output_dim==10 else False
-        self.model = self.load_model(model_dir, output_dim)
-    
+        if use_onnx_model:
+            model_dir = model_dir / "light_attention_onnx"
+            if  not model_dir.is_dir():
+                print(f"No light attention model available. The onnx model must be at {model_dir}")
+            if self.subcell:
+                la_subcell_model_path = f"{model_dir}/la_subcell.onnx"
+                try:
+                    self.model = ort.InferenceSession(la_subcell_model_path)
+                except NoSuchFile:
+                    print(f"ERROR: No onnx LA subcell model at path {la_subcell_model_path}.")
+                    quit()
+            else:
+                la_model_path = f"{model_dir}/la.onnx"
+                try:
+                    self.model = ort.InferenceSession(la_model_path)
+                except NoSuchFile:
+                    print(f"ERROR: No onnx LA model at path {la_model_path}.")
+                    quit()
+
+        else:
+            model_dir = model_dir / "light_attention"
+            if  not model_dir.is_dir():
+                model_dir.mkdir()
+            self.model = self.load_model(model_dir, output_dim)
+
     def load_model(self, model_dir, output_dim):
         if self.subcell:
             checkpoint_p = model_dir / "la_prott5_subcellular_localization.pt"
@@ -549,7 +615,7 @@ class LA():
         model = LightAttention(output_dim=output_dim)
         # LA has a normalization layer --> cast to fp32 for stability
         return load_model(model,weights_link,checkpoint_p).float()
-    
+
     # https://github.com/sacdallago/bio_embeddings/blob/develop/bio_embeddings/extract/light_attention/light_attention_annotation_extractor.py#L15
     def class2label(self):
         if self.subcell:
@@ -577,7 +643,7 @@ class LA():
             out_p = out_dir / "la_subcell_pred.txt"
         else:
             out_p = out_dir / "la_mem_pred.txt"
-            
+
         with open(out_p, 'w+') as out_f:
             out_f.write( '\n'.join( [ class2label[pred] for pred in predictions] ) )
         return None
@@ -598,8 +664,8 @@ class Ember3D:
         # Import here to avoid unnecessary dependencies if 3D output is not wanted
         import sys
         sys.path.insert(0, './EMBER3D')
-        from model import RF_1I1F
-        from Ember3D import Ember3D_Result
+        from EMBER3D.model import RF_1I1F
+        from EMBER3D.Ember3D import Ember3D_Result
         checkpoint_p = model_dir / "EMBER3D.model"
         weights_link = 'https://github.com/kWeissenow/EMBER3D/raw/main/model/EMBER3D.model'
         
@@ -803,8 +869,10 @@ class ProtGPT2():
 # various protein properties
 class ProtT5Microscope():
     
-    def __init__( self, seq_dict, model_dir, fmt ):
-        self.predictors, self.results = self.register_predictors(model_dir,fmt)
+    def __init__( self, seq_dict, model_dir, fmt, use_onnx_model=False):
+        self.predictors, self.results = self.register_predictors(model_dir,
+                                                                 fmt,
+                                                                 use_onnx_model=use_onnx_model)
         # only output attention heads if 3D output is requested
         output_attentions=True if "EMBER3D" in self.predictors else False
             
@@ -816,7 +884,7 @@ class ProtT5Microscope():
         self.sigm = nn.Sigmoid()
     
     
-    def register_predictors(self,model_dir,fmt):
+    def register_predictors(self, model_dir, fmt, use_onnx_model:bool):
         '''
 
         Parameters
@@ -824,7 +892,9 @@ class ProtT5Microscope():
         model_dir : PATH
             Path to the checkpoint directory 
         fmt : LIST
-            list of predictors to run 
+            list of predictors to run
+        use_onnx_model : BOOL
+            If the model should be loaded from an onnx file
 
         Returns
         -------
@@ -842,28 +912,28 @@ class ProtT5Microscope():
         for f in fmt:
             if f=="ss":
                 print("Loading secondary structure predictor")
-                p["ProtT5_SecStruct"] = SecStructPredictor(model_dir)
+                p["ProtT5_SecStruct"] = SecStructPredictor(model_dir, use_onnx_model=use_onnx_model)
                 r["SecStruct3"] = list() # 3-state secondary structure
                 r["SecStruct8"] = list() # 3-state secondary structure
                 
             elif f=="cons":
                 print("Loading conservation predictor")
-                p["VESPA_Conservation"] = ConservationPredictor(model_dir)
+                p["VESPA_Conservation"] = ConservationPredictor(model_dir=model_dir, use_onnx_model=use_onnx_model)
                 r["Conservation"] = list()
                 
             elif f=="dis":
                 print("Loading disorder predictor")
-                p["SETH"] = SETH(model_dir)
+                p["SETH"] = SETH(model_dir, use_onnnx_model=use_onnx_model)
                 r["Disorder"] = list()
                 
             elif f=="mem":
                 print("Loading transmembrane predictor")
-                p["TMbed"] = TMbed(model_dir)
+                p["TMbed"] = TMbed(model_dir=model_dir, use_onnx_model=use_onnx_model)
                 r["Membrane"] = list()
                 
             elif f=="bind":
                 print("Loading bindinx predictor")
-                p["BindEmbed21DL"] = BindPredict(model_dir)
+                p["BindEmbed21DL"] = BindPredict(model_dir, use_onnx_model=use_onnx_model)
                 r["Binding"] = list()
                 
             elif f=="go":
@@ -877,8 +947,8 @@ class ProtT5Microscope():
                 
             elif f=="subcell":
                 print("Loading subcellular location predictor")
-                p["LA-subcell"] = LA(model_dir,output_dim=10)
-                p["LA-mem"] = LA(model_dir,output_dim=2)
+                p["LA-subcell"] = LA(model_dir, output_dim=10, use_onnx_model=use_onnx_model)
+                p["LA-mem"] = LA(model_dir, output_dim=2, use_onnx_model=use_onnx_model)
                 r["Subcell"] = list()
                 r["LA-mem"] = list()
                 
@@ -926,8 +996,9 @@ class ProtT5Microscope():
         
         print("Finished loading: {} in {:.1f}[s]".format(transformer_name,time.time()-start))
         return model, tokenizer
-    
-    def batch_predict_residues( self, max_batch_size=100, max_residues=4000):
+
+
+    def batch_predict_residues( self, max_batch_size=100, max_residues=4000, use_onnx_model=False):
         sorted_seqs = sorted( self.seq_dict.items(), key=lambda kv: len( self.seq_dict[kv[0]] ), reverse=True )
         batch = list()
         print("Start predicting protein properties ...")
@@ -994,29 +1065,47 @@ class ProtT5Microscope():
                         
                         ### Residue-level predictions ###
                         # predict 3- and 8-state sec. struct
-                        if predictor_name=="ProtT5_SecStruct": 
-                            d3_Yhat, d8_Yhat = predictor.model(residue_embedding)
+                        if predictor_name=="ProtT5_SecStruct":
+                            if use_onnx_model:
+                                ort_inputs = {predictor.model.get_inputs()[0].name: residue_embedding.numpy()}
+                                d3_Yhat, d8_Yhat = predictor.model.run(None, ort_inputs)
+                                d3_Yhat = torch.from_numpy(np.float32(np.stack(d3_Yhat)))
+                                d8_Yhat = torch.from_numpy(np.float32(np.stack(d8_Yhat)))
+
+                            else:
+                                d3_Yhat, d8_Yhat = predictor.model(residue_embedding)
                             d3_Yhat = toCPU(torch.max( d3_Yhat, dim=-1, keepdim=True )[1] ).astype(np.byte)
                             d8_Yhat = toCPU(torch.max( d8_Yhat, dim=-1, keepdim=True )[1] ).astype(np.byte)
                             
                         elif predictor_name=="VESPA_Conservation":
-                            cons_Yhat = predictor.model(residue_embedding)
-                            cons_Yhat = toCPU(torch.max( cons_Yhat, dim=-1, keepdim=True )[1]).astype(np.byte)
+                            if use_onnx_model:
+                                ort_inputs = {predictor.model.get_inputs()[0].name: residue_embedding.numpy()}
+                                cons_Yhat = predictor.model.run(None, ort_inputs)
+                                cons_Yhat = torch.from_numpy(np.float32(np.stack(cons_Yhat[0])))
+                                cons_Yhat = toCPU(torch.max( cons_Yhat, dim=-1, keepdim=True )[1]).astype(np.byte)
+                            else:
+                                cons_Yhat = predictor.model(residue_embedding)
+                                cons_Yhat = toCPU(torch.max( cons_Yhat, dim=-1, keepdim=True )[1]).astype(np.byte)
                             
                         elif predictor_name=="SETH":
-                            diso_Yhat = toCPU( predictor.model(residue_embedding) )
+                            if use_onnx_model:
+                                ort_inputs = {predictor.model.get_inputs()[0].name: residue_embedding.numpy()}
+                                diso_Yhat = predictor.model.run(None, ort_inputs)
+                                diso_Yhat = toCPU(torch.from_numpy(np.float32(np.stack(diso_Yhat[0]))))
+                            else:
+                                diso_Yhat = toCPU( predictor.model(residue_embedding) )
                             
                         elif predictor_name=="TMbed":
+                            # for each registered predictor
                             B,L,_ = residue_embedding.shape
                             # prediction container to gather ensemble predictions
                             # 5 due to an ensemble of 5 models
                             pred = torch.zeros((B, 5, L), device=device,dtype=torch.float32)
-                            
                             for model in predictor.model:
                                 # TMbed has a normalization layer --> use fp32 for stability
                                 y = model(residue_embedding.float(), attention_mask.float())
                                 pred = pred + torch.softmax(y, dim=1)
-                                
+
                             probabilities = (pred / len(predictor.model))
                             mem_Yhat = toCPU( predictor.decoder(probabilities, attention_mask) ).astype(np.byte)
                         
@@ -1025,7 +1114,14 @@ class ProtT5Microscope():
                             # container for adding predictions of individual models in the ensemble
                             ensemble_container = torch.zeros( (B, 3, L), device=device,dtype=torch.float16)
                             for model in predictor.model: # for each model in the ensemble
-                                pred = self.sigm( model(residue_embedding_transpose) )
+                                if use_onnx_model:
+                                    ort_inputs = {model.get_inputs()[0].name: residue_embedding_transpose.numpy()}
+                                    model_output_numpy = model.run(None, ort_inputs)
+                                    model_output_torch = torch.from_numpy(np.float32(np.stack(model_output_numpy[0])))
+                                    pred = self.sigm(model_output_torch)
+                                    pred = torch.from_numpy(np.float32(np.stack(pred)))
+                                else:
+                                    pred = self.sigm( model(residue_embedding_transpose) )
                                 ensemble_container = ensemble_container + pred
                             # normalize
                             bind_Yhat = ensemble_container / len(predictor.model)
@@ -1036,12 +1132,24 @@ class ProtT5Microscope():
                         ### Protein-level predictions ###
                         # Light-attention predicts 10 subcellular localizations
                         elif predictor_name=="LA-subcell":
-                            # Light attention has a batch-norm layer --> use fp32 for stability
-                            subcell_Yhat = predictor.model(residue_embedding_transpose.float(),attention_mask)
+                            if use_onnx_model:
+                                ort_inputs = {'input': residue_embedding_transpose.numpy(),
+                                              'mask': attention_mask.numpy().astype(int)}
+                                subcell_Yhat = predictor.model.run(None, ort_inputs)
+                                subcell_Yhat = torch.from_numpy(np.float32(np.stack(subcell_Yhat[0])))
+                            else:
+                                # Light attention has a batch-norm layer --> use fp32 for stability
+                                subcell_Yhat = predictor.model(residue_embedding_transpose.float(),attention_mask.int())
                             subcell_Yhat = toCPU(torch.max(subcell_Yhat, dim=1)[1]).astype(np.byte)
                         # Light-attention predicts also membrane-bound vs water-soluble
                         elif predictor_name=="LA-mem":
-                            la_mem_Yhat = predictor.model(residue_embedding_transpose.float(),attention_mask)
+                            if use_onnx_model:
+                                ort_inputs = {'input': residue_embedding_transpose.numpy(),
+                                              'mask': attention_mask.numpy().astype(int)}
+                                la_mem_Yhat = predictor.model.run(None, ort_inputs)
+                                la_mem_Yhat = torch.from_numpy(np.float32(np.stack(la_mem_Yhat[0])))
+                            else:
+                                la_mem_Yhat = predictor.model(residue_embedding_transpose.float(),attention_mask.int())
                             la_mem_Yhat = toCPU(torch.max(la_mem_Yhat, dim=1)[1]).astype(np.byte)
                         ### EAT-based methods ###
                         elif predictor_name=="ProtTucker":
@@ -1140,6 +1248,7 @@ def eat(lookup_embs, lookup_ids, lookup_labels, queries,threshold, norm=2):
 
     # get closes neighbor for each query
     nn_dists, nn_idxs = torch.topk(pdist, 1, largest=False, dim=0)
+    nn_dists, nn_idxs = torch.topk(pdist, 1, largest=False, dim=0)
 
     predictions=list()
     n_test = queries.shape[0]
@@ -1183,13 +1292,14 @@ def load_model(model, weights_link, checkpoint_p,state_dict="state_dict"):
       # Torch load will map back to device from state, which often is GPU:0.
       # to overcome, need to explicitly map to active device
       global device
-
+      if not device:
+          device = get_device()
       state = torch.load(checkpoint_p, map_location=device)
 
       model.load_state_dict(state[state_dict])
 
       model = model.eval()
-      model = model.half()
+      #model = model.half()
       model = model.to(device)
 
       return model
@@ -1255,8 +1365,8 @@ def create_arg_parser():
                     help='The number of sequences in a ProtT5 batch.')
 
     # Optional positional argument
-    parser.add_argument( '-r', '--residues_per_batch', required=False, type=int, default=4000, 
-                    help='The max number of residues in a ProtT5 batch.')                   
+    parser.add_argument( '-r', '--residues_per_batch', required=False, type=int, default=4000,
+                    help='The max number of residues in a ProtT5 batch.')
     
     # Optional positional argument
     parser.add_argument( '-f', '--fmt', required=False, type=str, default="ss,cons,dis,mem,bind,go,subcell,tucker", 
@@ -1291,7 +1401,10 @@ def create_arg_parser():
                         ss,cons,dis,mem,bind,go,subcell,tucker,ember,emb
                     """
                     )
-
+    parser.add_argument( '-e', '--embeddings_from_file', required=False, type=str, default='',
+                         help='Path to a .h5-File where ProtT5 Embeddings are stored. Leave empty if you want to calculate new embeddings')
+    parser.add_argument( '-x', '--onnx', required=False,action="store_true",
+                         help='If the model should be loaded from an onnx file.')
     return parser
 
 
@@ -1331,20 +1444,31 @@ def main():
     out_dir  = Path( args.output)
     if not out_dir.is_dir():
         out_dir.mkdir()
-        
+
     # Load model(s) and generate predictions
-    microscope=ProtT5Microscope(seq_dict,model_dir,fmt)
-    microscope.batch_predict_residues(max_batch_size=args.batch_size, max_residues=args.residues_per_batch)
+    microscope=ProtT5Microscope(seq_dict,model_dir,fmt, use_onnx_model=args.onnx)
+    if args.embeddings_from_file:
+        microscope.batch_predict_resedues_from_loaded_embs(path_to_embeddings=args.embeddings_from_file,
+                                                           max_batch_size=args.batch_size,
+                                                           max_residues=args.residues_per_batch,
+                                                           use_onnx_model=args.onnx)
+    else:
+        microscope.batch_predict_residues(max_batch_size=args.batch_size,
+                                          max_residues=args.residues_per_batch)
+        # write sequences
+        seq_out_p = out_dir / "seqs.txt"
+        microscope.write_list(microscope.seqs, seq_out_p)
 
     # write IDs
     id_out_p = out_dir / "ids.txt"
     microscope.write_list(microscope.ids,id_out_p)
     
     # write sequences
-    seq_out_p = out_dir / "seqs.txt"
-    microscope.write_list(microscope.seqs, seq_out_p)
-    
-    
+    if not args.embeddings_from_file:
+        seq_out_p = out_dir / "seqs.txt"
+        microscope.write_list(microscope.seqs, seq_out_p)
+
+
     for f in fmt:
         if f=="ss":
             # write 3-state DSSP

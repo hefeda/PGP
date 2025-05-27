@@ -19,6 +19,8 @@ import torch.nn.functional as F
 
 import math
 
+from custom_pytorch_utils import unfold_custom
+
 def gaussian(x, std):
     pi = torch.tensor(math.pi)
     s2 = 2.0*torch.tensor(std).square()
@@ -157,7 +159,7 @@ class Predictor(nn.Module):
 
         x = F.pad(x, pad=(3, 3), mode='constant', value=0.0)
 
-        x = x.unfold(dimension=2, size=7, step=1)
+        x = unfold_custom(input_tensor=x, dimension=2, size=7, step=1)
 
         x = torch.einsum('bcnm,m->bcn', x, self.filter_kernel)
 

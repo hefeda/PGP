@@ -64,6 +64,23 @@ python prott5_batch_predictor.py --output halluzination_analysis --n_gen 50 --fm
 ```
 This allows, for example, to (de-)activate 3D structure prediction. See --help for more information on the output format. By default, all predictors except 3D structure prediction and per-proteins embeddings are written (those quickly generate large amounts of data when applied to millions of proteins and should only be used with caution; default=`--fmt ss,cons,dis,mem,bind,go,subcell,tucker`.
 
+### Precomputed embeddings
+If you want to use precomputed embeddings, you can pass the --embeddings_from_file parameter and add the path to the .h5-embeddings:
+```sh
+python prott5_batch_predictor.py --input example_output/pp_examples.fasta --output test_output --fmt seth -e Embeddings/Rostlab_prot_t5_xl_uniref50.h5
+```
+This only works the models listed [here](#models-which-support-precomputed-embeddings-and-onnx-exports).
+
+### onnx Model
+If you want to use an onnx and not a pytorch model you can run it using the --onnx flags:
+```sh
+python prott5_batch_predictor.py --input example_output/pp_examples.fasta --output test_output --fmt mem -e Embeddings/Rostlab_prot_t5_xl_uniref50.h5 --onnx
+```
+You have to make sure that the onnx-model is at /checkpoints/{modeltype}_onnx. It only works for the models listed [here](#models-which-support-precomputed-embeddings-and-onnx-exports).
+
+### Models which support precomputed embeddings and onnx exports
+Conservation, Secondary Structure, Light Attention, SETH
+
 ## Reproducibility
 The datasets used for the analysis in the manuscript are available at: http://data.bioembeddings.com/public/design/.
 Place them into a folder called `private` inside this repo to run the Jupyter Notebooks.
