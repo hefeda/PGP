@@ -67,7 +67,7 @@ This allows, for example, to (de-)activate 3D structure prediction. See --help f
 ### Precomputed embeddings
 If you want to use precomputed embeddings, you can pass the --embeddings_from_file parameter and add the path to the .h5-embeddings:
 ```sh
-python prott5_batch_predictor.py --input example_output/pp_examples.fasta --output test_output --fmt mem -e Embeddings/Rostlab_prot_t5_xl_uniref50.h5
+python prott5_batch_predictor.py --input example_output/pp_examples.fasta --output test_output --fmt seth -e Embeddings/Rostlab_prot_t5_xl_uniref50.h5
 ```
 This only works the models listed [here](#models-which-support-precomputed-embeddings-and-onnx-exports).
 
@@ -79,7 +79,7 @@ python prott5_batch_predictor.py --input example_output/pp_examples.fasta --outp
 You have to make sure that the onnx-model is at /checkpoints/{modeltype}_onnx. It only works for the models listed [here](#models-which-support-precomputed-embeddings-and-onnx-exports).
 
 ### Models which support precomputed embeddings and onnx exports
-Tmbed, Conservation, Secondary Structure, Light Attention, SETH
+Conservation, Secondary Structure, Light Attention, SETH
 
 ## Reproducibility
 The datasets used for the analysis in the manuscript are available at: http://data.bioembeddings.com/public/design/.

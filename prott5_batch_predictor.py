@@ -271,15 +271,11 @@ class ConservationPredictor():
 class TMbed():
     
     def __init__(self,model_dir, use_onnx_model=False):
-        if use_onnx_model:
-            model_dir = f'{model_dir}/tmbed_onnx'
-            self.model = self.load_model_onnx(model_dir)
-        else:
-            model_dir = model_dir / "tmbed"
-            if  not model_dir.is_dir():
-                model_dir.mkdir()
-            self.model = self.load_model(model_dir)
 
+        model_dir = model_dir / "tmbed"
+        if  not model_dir.is_dir():
+            model_dir.mkdir()
+        self.model = self.load_model(model_dir)
         self.decoder = Decoder().to(device)
 
     def load_model(self,model_dir):
@@ -293,18 +289,6 @@ class TMbed():
             models.append( load_model(model,weights_link,checkpoint_p,state_dict="model").float() )
 
         return models
-
-    def load_model_onnx(self, model_dir):
-        models = []
-        for onnx_file in Path(model_dir).iterdir():
-            try:
-                onnx_model = ort.InferenceSession(onnx_file)
-                models.append(onnx_model)
-            except NoSuchFile:
-                print(f"ERROR: No onnx TMbed model at path {onnx_file}.")
-                quit()
-        return models
-
 
     def pred2label(self):
         return {0: 'B', 1: 'b', 2: 'H', 3: 'h', 4: 'S', 5: 'i', 6: 'o'}
@@ -1118,14 +1102,8 @@ class ProtT5Microscope():
                             # 5 due to an ensemble of 5 models
                             pred = torch.zeros((B, 5, L), device=device,dtype=torch.float32)
                             for model in predictor.model:
-                                if use_onnx_model:
-                                    ort_inputs = {'input': residue_embedding.numpy(),
-                                                  'mask': attention_mask.numpy()}
-                                    y = model.run(None, ort_inputs)
-                                    y = torch.from_numpy(np.float32(np.stack(y[0])))
-                                else:
-                                    # TMbed has a normalization layer --> use fp32 for stability
-                                    y = model(residue_embedding.float(), attention_mask.float())
+                                # TMbed has a normalization layer --> use fp32 for stability
+                                y = model(residue_embedding.float(), attention_mask.float())
                                 pred = pred + torch.softmax(y, dim=1)
 
                             probabilities = (pred / len(predictor.model))
