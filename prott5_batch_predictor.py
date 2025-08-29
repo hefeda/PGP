@@ -324,9 +324,7 @@ class SETH():
         
     def load_model(self,model_dir):
         checkpoint_p = model_dir / "seth_checkpoint.pt"
-        # Weight link doens't work -> weight was downloaded from the original repo
-        # https://github.com/DagmarIlz/SETH/blob/main/CNN/CNN.pt
-        weights_link = "https://rostlab.org/~deepppi/SETH_CNN.pt"
+        weights_link = "https://github.com/DagmarIlz/SETH/blob/main/CNN/CNN.pt"
         model = DisorderCNN()
         return load_model(model, weights_link, checkpoint_p)
     
